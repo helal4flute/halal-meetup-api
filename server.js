@@ -478,35 +478,74 @@ app.get('/api/users/:id', auth, async (req, res) => {
 app.get('/api/discover', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const r  = await db.request()
-      .input('user_id',  sql.NVarChar(36), req.user.id)
-      .input('page_size',sql.Int, parseInt(req.query.page_size||'20'))
-      .input('offset',   sql.Int, parseInt(req.query.page||'0')*parseInt(req.query.page_size||'20'))
-      .execute('dbo.sp_DiscoverProfiles');
+    const page     = parseInt(req.query.page||'0');
+    const pageSize = parseInt(req.query.page_size||'20');
+    // Get user's gender for opposite-gender matching
+    const meR = await db.request()
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query('SELECT gender FROM dbo.users WHERE id=@uid');
+    const myGender = meR.recordset[0]?.gender || '';
+    const oppGender = myGender === 'Male' ? 'Female' : myGender === 'Female' ? 'Male' : '';
+    // Build discover query — no id_verified requirement for pilot
+    const r = await db.request()
+      .input('uid',      sql.NVarChar(36), req.user.id)
+      .input('offset',   sql.Int, page * pageSize)
+      .input('pageSize', sql.Int, pageSize)
+      .input('oppGender',sql.NVarChar(10), oppGender)
+      .query(`SELECT u.id, u.first_name, u.last_name,
+                     DATEDIFF(YEAR,u.dob,GETDATE()) AS age,
+                     u.city, u.country, u.sect, u.marital_status,
+                     u.bio, u.occupation, u.interests,
+                     u.photo_1, u.photo_2, u.photo_3,
+                     u.id_verified, u.online, u.premium
+              FROM dbo.users u
+              WHERE u.id <> @uid
+                AND u.is_banned = 0
+                AND (@oppGender = '' OR u.gender = @oppGender)
+                AND u.id NOT IN (
+                  SELECT to_user_id FROM dbo.likes WHERE from_user_id=@uid
+                )
+                AND u.id NOT IN (
+                  SELECT CASE WHEN user1_id=@uid THEN user2_id ELSE user1_id END
+                  FROM dbo.matches WHERE user1_id=@uid OR user2_id=@uid
+                )
+              ORDER BY u.premium DESC, u.id_verified DESC, u.created_at DESC
+              OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY`);
     return ok(res, r.recordset);
-  } catch(e) { return err(res,'Failed.',500); }
+  } catch(e) { console.error('Discover:',e.message); return err(res,'Failed to load profiles.',500); }
 });
 
 // ── SEARCH ────────────────────────────────────────────────────
 app.get('/api/search', auth, async (req, res) => {
   try {
-    const { country, sect, marital_status, verified_only, min_age, max_age } = req.query;
+    const { name, country, sect, marital_status, verified_only, min_age, max_age } = req.query;
     const db = await getPool();
     const rq = db.request().input('uid',sql.NVarChar(36),req.user.id);
-    let where = 'id<>@uid AND is_banned=0';
-    if (country)         { where+=` AND (city LIKE @c OR country LIKE @c)`;        rq.input('c',sql.NVarChar(100),`%${country}%`); }
-    if (sect)            { where+=` AND sect LIKE @s`;                              rq.input('s',sql.NVarChar(100),`%${sect}%`); }
-    if (marital_status)  { where+=` AND marital_status=@ms`;                        rq.input('ms',sql.NVarChar(30),marital_status); }
-    if (verified_only==='true') where+=' AND id_verified=1';
-    if (min_age)         { where+=` AND age>=@mina`; rq.input('mina',sql.Int,parseInt(min_age)); }
-    if (max_age)         { where+=` AND age<=@maxa`; rq.input('maxa',sql.Int,parseInt(max_age)); }
-    const r = await rq.query(`SELECT id,first_name,last_name,age,city,country,sect,
-                                      marital_status,photo_1,id_verified,online
-                               FROM dbo.vw_PublicProfiles WHERE ${where}
-                               ORDER BY id_verified DESC,online DESC
-                               OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY`);
+    let where = 'u.id<>@uid AND u.is_banned=0';
+    if (name)            { where+=` AND (u.first_name LIKE @nm OR u.last_name LIKE @nm)`;
+                           rq.input('nm',sql.NVarChar(100),`%${name}%`); }
+    if (country)         { where+=` AND (u.city LIKE @c OR u.country LIKE @c)`;
+                           rq.input('c',sql.NVarChar(100),`%${country}%`); }
+    if (sect)            { where+=` AND u.sect LIKE @s`;
+                           rq.input('s',sql.NVarChar(100),`%${sect}%`); }
+    if (marital_status)  { where+=` AND u.marital_status=@ms`;
+                           rq.input('ms',sql.NVarChar(30),marital_status); }
+    if (verified_only==='true') where+=' AND u.id_verified=1';
+    if (min_age)         { where+=` AND DATEDIFF(YEAR,u.dob,GETDATE())>=@mina`;
+                           rq.input('mina',sql.Int,parseInt(min_age)); }
+    if (max_age)         { where+=` AND DATEDIFF(YEAR,u.dob,GETDATE())<=@maxa`;
+                           rq.input('maxa',sql.Int,parseInt(max_age)); }
+    const q = 'SELECT u.id, u.first_name, u.last_name,'
+            + ' DATEDIFF(YEAR,u.dob,GETDATE()) AS age,'
+            + ' u.city, u.country, u.sect, u.marital_status,'
+            + ' u.photo_1, u.id_verified, u.online, u.bio'
+            + ' FROM dbo.users u'
+            + ' WHERE ' + where
+            + ' ORDER BY u.id_verified DESC, u.online DESC, u.created_at DESC'
+            + ' OFFSET 0 ROWS FETCH NEXT 50 ROWS ONLY';
+    const r = await rq.query(q);
     return ok(res, r.recordset);
-  } catch(e) { console.error('Search:',e.message); return err(res,'Failed.',500); }
+  } catch(e) { console.error('Search:',e.message); return err(res,'Search failed.',500); }
 });
 
 // ── LIKES & MATCHES ───────────────────────────────────────────
