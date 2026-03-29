@@ -726,10 +726,12 @@ app.post('/api/calls', auth, async (req, res) => {
     if (!to_user_id || !call_type) return err(res, 'to_user_id and call_type required.');
     const db  = await getPool();
 
-    // First: make match_id nullable if it isn't (run once, safe to repeat)
+    // Fix constraints on first call (safe to repeat)
     try {
       await db.request().query("ALTER TABLE dbo.call_logs ALTER COLUMN match_id NVARCHAR(36) NULL");
-    } catch(e) { /* already nullable */ }
+      await db.request().query("ALTER TABLE dbo.call_logs DROP CONSTRAINT CK_call_status");
+      await db.request().query("ALTER TABLE dbo.call_logs ADD CONSTRAINT CK_call_status CHECK ([status] IN ('ringing','accepted','completed','missed','declined','ended'))");
+    } catch(e) { /* already fixed */ }
 
     // Get caller name
     const cR = await db.request().input('uid', sql.NVarChar(36), req.user.id)
@@ -1010,6 +1012,21 @@ async function migrateCallLogs() {
       console.log('[DB] Migration complete:', callToAdd.length + notifToAdd.length, 'columns added');
     else
       console.log('[DB] Schema up to date');
+
+    // Fix call_logs status CHECK constraint to support WebRTC call states
+    try {
+      await db.request().query("ALTER TABLE dbo.call_logs DROP CONSTRAINT CK_call_status");
+      await db.request().query("ALTER TABLE dbo.call_logs ADD CONSTRAINT CK_call_status CHECK ([status] IN ('ringing','accepted','completed','missed','declined','ended'))");
+      console.log('[DB] CK_call_status constraint updated');
+    } catch(e2) { /* constraint already updated or dropped */ }
+
+    // Make match_id nullable (has FK but we need to allow calls without match_id)
+    try {
+      await db.request().query("ALTER TABLE dbo.call_logs DROP CONSTRAINT FK_calls_match");
+      await db.request().query("ALTER TABLE dbo.call_logs ALTER COLUMN match_id NVARCHAR(36) NULL");
+      console.log('[DB] match_id made nullable');
+    } catch(e3) { /* already done */ }
+
   } catch(e) {
     console.error('[DB Migration]:', e.message);
   }
