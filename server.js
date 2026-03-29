@@ -808,7 +808,6 @@ app.post('/api/reports', auth, async (req, res) => {
 });
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────
-app.
 // Send notification (used by call system)
 app.post('/api/notifications', auth, async (req, res) => {
   try {
