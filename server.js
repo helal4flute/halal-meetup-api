@@ -553,14 +553,37 @@ app.post('/api/likes', auth, async (req, res) => {
   try {
     const { to_user_id } = req.body;
     if (!to_user_id) return err(res,'to_user_id required.');
-    if (to_user_id===req.user.id) return err(res,'Cannot like yourself.');
+    if (to_user_id === req.user.id) return err(res,'Cannot like yourself.');
     const db = await getPool();
-    const r  = await db.request()
-      .input('from_user_id',sql.NVarChar(36),req.user.id)
-      .input('to_user_id',  sql.NVarChar(36),to_user_id)
+
+    // Get sender's name for notification
+    const senderR = await db.request()
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query('SELECT first_name, last_name FROM dbo.users WHERE id=@uid');
+    const sender = senderR.recordset[0] || {};
+    const senderName = (sender.first_name || 'Someone') + ' ' + (sender.last_name ? sender.last_name[0] + '.' : '');
+
+    // Execute like + match check
+    const r = await db.request()
+      .input('from_user_id', sql.NVarChar(36), req.user.id)
+      .input('to_user_id',   sql.NVarChar(36), to_user_id)
       .execute('dbo.sp_LikeUser');
-    return ok(res, r.recordset[0]);
-  } catch(e) { return err(res,'Failed.',500); }
+    const result = r.recordset[0] || {};
+
+    if (result.result !== 'MATCHED') {
+      // Single like — notify the liked user
+      await db.request()
+        .input('to_uid',   sql.NVarChar(36),  to_user_id)
+        .input('from_uid', sql.NVarChar(36),  req.user.id)
+        .input('title',    sql.NVarChar(200),  senderName + ' liked your profile! 💚')
+        .input('body',     sql.NVarChar(500),  "If you like them back, you'll match and can start chatting.")
+        .query(`INSERT INTO dbo.notifications (user_id,type,title,body,related_user_id,is_read)
+                VALUES (@to_uid,'like',@title,@body,@from_uid,0)`)
+        .catch(e => console.error('Like notification failed:', e.message));
+    }
+
+    return ok(res, result);
+  } catch(e) { console.error('Like error:', e.message); return err(res, 'Failed.', 500); }
 });
 
 app.get('/api/matches', auth, async (req, res) => {
@@ -757,11 +780,21 @@ app.get('/api/notifications', auth, async (req, res) => {
   } catch(e) { return err(res,'Failed.',500); }
 });
 
+app.patch('/api/notifications/read-all', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    await db.request()
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query("UPDATE dbo.notifications SET is_read=1 WHERE user_id=@uid");
+    return ok(res, { done: true });
+  } catch(e) { return err(res, 'Failed.', 500); }
+});
+
 app.patch('/api/notifications/:id/read', auth, async (req, res) => {
   try {
     const db = await getPool();
     await db.request().input('id',sql.NVarChar(36),req.params.id).input('uid',sql.NVarChar(36),req.user.id)
-      .query(`UPDATE dbo.notifications SET is_read=1 WHERE id=@id AND user_id=@uid`);
+      .query("UPDATE dbo.notifications SET is_read=1 WHERE id=@id AND user_id=@uid");
     return ok(res,{message:'Marked read.'});
   } catch(e) { return err(res,'Failed.',500); }
 });
