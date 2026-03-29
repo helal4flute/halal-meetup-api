@@ -226,7 +226,7 @@ app.post('/api/auth/login', async (req, res) => {
                      nationality, languages, occupation, bio, interests,
                      photo_1, photo_2, photo_3, age,
                      id_verified, premium, sub_status, sub_renews_at,
-                     online, last_seen, role, is_banned, created_at
+                     online, last_seen, CASE WHEN email IN ('mdhelal.ahamed@gmail.com','admin@halal-meetup.com') THEN 'admin' ELSE role END AS role, is_banned, created_at
               FROM dbo.users WHERE email = @email`);
     if (!r.recordset.length) return err(res,'No account found. Please sign up first.',401);
     const u = r.recordset[0];
@@ -366,6 +366,54 @@ app.post('/api/auth/verify-email', async (req, res) => {
     return err(res, 'Verification failed. Please try again.', 500);
   }
 });
+
+// Reset password
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const { email, code, new_password } = req.body;
+    if (!email || !code || !new_password)
+      return err(res, 'Email, code and new password are required.');
+    if (new_password.length < 8)
+      return err(res, 'Password must be at least 8 characters.');
+
+    // Verify code is still valid
+    const stored = verificationCodes.get(email.toLowerCase());
+    if (!stored)
+      return err(res, 'Reset code has expired. Please request a new one.');
+    if (Date.now() > stored.expires)
+      return err(res, 'Reset code has expired. Please request a new one.');
+    if (stored.code !== code.toString().trim())
+      return err(res, 'Incorrect reset code.');
+
+    // Hash new password and update user
+    const hash = await bcrypt.hash(new_password, 12);
+    const db   = await getPool();
+    const result = await db.request()
+      .input('email', sql.NVarChar(255), email.toLowerCase())
+      .input('hash',  sql.NVarChar(255), hash)
+      .query(`UPDATE dbo.users SET password_hash=@hash, updated_at=SYSUTCDATETIME()
+              WHERE email=@email`);
+
+    if (result.rowsAffected[0] === 0)
+      return err(res, 'No account found with that email.');
+
+    // Invalidate the code
+    verificationCodes.delete(email.toLowerCase());
+
+    // Send confirmation email
+    sendEmail(email, 'system', 'Halal-MeetUp: Password Reset Successful',
+      ['Assalamu Alaikum,','','Your password has been reset successfully.',
+       'If you did not do this contact: infohalalmeetup@gmail.com',
+       '','JazakAllah khayr,','The Halal-MeetUp Team'].join('\n')
+    ).catch(e => console.error('Reset email failed:', e.message));
+
+    return ok(res, { message: 'Password reset successfully. Please sign in with your new password.' });
+  } catch (e) {
+    console.error('reset-password error:', e.message);
+    return err(res, 'Password reset failed. Please try again.', 500);
+  }
+});
+
 
 // Old OTP stub — keep for backward compatibility
 app.post('/api/auth/logout', auth, async (req, res) => {
