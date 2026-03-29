@@ -725,22 +725,53 @@ app.post('/api/calls', auth, async (req, res) => {
     const { to_user_id, call_type, sdp_offer } = req.body;
     if (!to_user_id || !call_type) return err(res, 'to_user_id and call_type required.');
     const db  = await getPool();
-    const cR  = await db.request().input('uid',sql.NVarChar(36),req.user.id)
-      .query("SELECT first_name,last_name FROM dbo.users WHERE id=@uid");
-    const cr  = cR.recordset[0]||{};
+
+    // First: make match_id nullable if it isn't (run once, safe to repeat)
+    try {
+      await db.request().query("ALTER TABLE dbo.call_logs ALTER COLUMN match_id NVARCHAR(36) NULL");
+    } catch(e) { /* already nullable */ }
+
+    // Get caller name
+    const cR = await db.request().input('uid', sql.NVarChar(36), req.user.id)
+      .query("SELECT first_name, last_name FROM dbo.users WHERE id=@uid");
+    const cr = cR.recordset[0] || {};
+    const callerName = (cr.first_name||'') + (cr.last_name ? ' ' + cr.last_name[0] + '.' : '');
+
+    // Look up match_id (best-effort — not required)
+    let matchId = null;
+    try {
+      const mR = await db.request()
+        .input('u1', sql.NVarChar(36), req.user.id)
+        .input('u2', sql.NVarChar(36), to_user_id)
+        .query("SELECT TOP 1 id FROM dbo.matches WHERE (user1_id=@u1 AND user2_id=@u2) OR (user1_id=@u2 AND user2_id=@u1)");
+      matchId = mR.recordset[0] ? mR.recordset[0].id : null;
+    } catch(e) { /* match lookup failed — continue without it */ }
+
     const callId = require('crypto').randomBytes(16).toString('hex');
-    const callerName = (cr.first_name||'')+(cr.last_name?' '+cr.last_name[0]+'.':'');
-    await db.request()
-      .input('id',          sql.NVarChar(36),      callId)
-      .input('cid',         sql.NVarChar(36),      req.user.id)
-      .input('rid',         sql.NVarChar(36),      to_user_id)
-      .input('ctype',       sql.NVarChar(10),      call_type)
-      .input('stat',        sql.NVarChar(15),      'ringing')
-      .input('sdp',         sql.NVarChar(sql.MAX), sdp_offer||'')
-      .input('cname',       sql.NVarChar(200),     callerName)
-      .query("INSERT INTO dbo.call_logs(id,caller_id,receiver_id,call_type,status,sdp_offer,caller_name,duration_seconds) VALUES(@id,@cid,@rid,@ctype,@stat,@sdp,@cname,0)");
+
+    // Build INSERT dynamically — only include match_id if we have it
+    const rq = db.request()
+      .input('id',    sql.NVarChar(36),      callId)
+      .input('cid',   sql.NVarChar(36),      req.user.id)
+      .input('rid',   sql.NVarChar(36),      to_user_id)
+      .input('ctype', sql.NVarChar(10),      call_type)
+      .input('stat',  sql.NVarChar(15),      'ringing')
+      .input('sdp',   sql.NVarChar(sql.MAX), sdp_offer || '')
+      .input('cname', sql.NVarChar(200),     callerName);
+
+    if (matchId) {
+      rq.input('mid', sql.NVarChar(36), matchId);
+      await rq.query("INSERT INTO dbo.call_logs(id,match_id,caller_id,receiver_id,call_type,status,sdp_offer,caller_name,duration_seconds) VALUES(@id,@mid,@cid,@rid,@ctype,@stat,@sdp,@cname,0)");
+    } else {
+      await rq.query("INSERT INTO dbo.call_logs(id,caller_id,receiver_id,call_type,status,sdp_offer,caller_name,duration_seconds) VALUES(@id,@cid,@rid,@ctype,@stat,@sdp,@cname,0)");
+    }
+
+    console.log('[CALL] Created:', callId, '| type:', call_type, '| match:', matchId || 'none');
     return ok(res, { call_id: callId, status: 'ringing' }, 201);
-  } catch(e) { console.error('Call POST:', e.message); return err(res,'Failed: '+e.message,500); }
+  } catch(e) {
+    console.error('Call POST:', e.message);
+    return err(res, 'Failed to create call: ' + e.message, 500);
+  }
 });
 
 // Get single call (for polling)
@@ -960,6 +991,10 @@ async function migrateCallLogs() {
     if (!callExisting.includes('caller_name')) callToAdd.push("ALTER TABLE dbo.call_logs ADD caller_name NVARCHAR(200) NULL");
     if (!callExisting.includes('ended_at'))    callToAdd.push("ALTER TABLE dbo.call_logs ADD ended_at DATETIME2 NULL");
     if (!callExisting.includes('id'))          callToAdd.push("ALTER TABLE dbo.call_logs ADD id NVARCHAR(36) NOT NULL DEFAULT NEWID()");
+    // Make match_id nullable if it isn't already (call between non-matched users)
+    try {
+      await db.request().query("ALTER TABLE dbo.call_logs ALTER COLUMN match_id NVARCHAR(36) NULL");
+    } catch(e2) { /* already nullable or doesn't exist */ }
     for (const s of callToAdd) { await db.request().query(s); console.log('[Migration]', s); }
 
     // Migrate notifications table — add call_id if missing
