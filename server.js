@@ -188,7 +188,7 @@ app.post('/api/auth/register', async (req, res) => {
       '2. Discover matches — swipe right to like.',
       '3. Chat — text chat is free with all your matches.',
       '',
-      'PREMIUM ($10/week): Audio & Video calls · Ludo game · Live photos',
+      'PREMIUM ($10/month): Audio & Video calls · Ludo game · Live photos',
       'Cancel anytime from My Profile > Settings.',
       '',
       'SAFETY: All profiles are ID-verified. Complete yours in the app.',
