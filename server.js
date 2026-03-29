@@ -430,13 +430,16 @@ app.get('/api/users/me', auth, async (req, res) => {
   try {
     const db = await getPool();
     const r  = await db.request().input('id',sql.NVarChar(36),req.user.id)
-      .query(`SELECT id,first_name,last_name,email,phone,gender,sect,
-                     marital_status,education,country,city,nationality,
-                     languages,occupation,bio,interests,
-                     photo_1,photo_2,photo_3,age,
-                     id_verified,premium,sub_status,sub_renews_at,
-                     online,last_seen,role,created_at
-              FROM dbo.users WHERE id=@id`);
+      .query(`SELECT u.id,u.first_name,u.last_name,u.email,u.phone,u.gender,u.sect,
+                     u.marital_status,u.education,u.country,u.city,u.nationality,
+                     u.languages,u.occupation,u.bio,u.interests,
+                     u.photo_1,u.photo_2,u.photo_3,
+                     DATEDIFF(YEAR,u.dob,GETDATE()) AS age,
+                     u.id_verified,u.premium,u.sub_status,u.sub_renews_at,
+                     u.online,u.last_seen,u.role,u.created_at,
+                     (SELECT COUNT(*) FROM dbo.matches WHERE user1_id=u.id OR user2_id=u.id) AS match_count,
+                     (SELECT COUNT(*) FROM dbo.likes WHERE to_user_id=u.id) AS like_count
+              FROM dbo.users u WHERE u.id=@id`);
     if (!r.recordset.length) return err(res,'Not found.',404);
     return ok(res, r.recordset[0]);
   } catch(e) { return err(res,'Failed.',500); }
@@ -445,7 +448,8 @@ app.get('/api/users/me', auth, async (req, res) => {
 app.put('/api/users/me', auth, async (req, res) => {
   try {
     const fields = ['first_name','last_name','occupation','city','country',
-                    'sect','interests','nationality','education','bio','marital_status'];
+                    'sect','interests','nationality','education','bio','marital_status',
+                    'photo_1','photo_2','photo_3'];
     const db = await getPool();
     const rq = db.request().input('id',sql.NVarChar(36),req.user.id);
     const sets = ['updated_at=SYSUTCDATETIME()'];
