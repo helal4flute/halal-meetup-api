@@ -39,13 +39,18 @@ let pool = null;
 
 // ── Email transporter (Gmail SMTP primary, SendGrid fallback) ──
 function createTransporter() {
-  const gmailUser = cleanEnv(process.env.GMAIL_USER);
-  const gmailPass = cleanEnv(process.env.GMAIL_APP_PASSWORD);
-  if (gmailUser && gmailPass) {
-    return nodemailer.createTransport({
-      service: 'gmail',
-      auth: { user: gmailUser, pass: gmailPass }
-    });
+  try {
+    const gmailUser = cleanEnv(process.env.GMAIL_USER);
+    const gmailPass = cleanEnv(process.env.GMAIL_APP_PASSWORD);
+    if (gmailUser && gmailPass) {
+      const nm = require('nodemailer');
+      return nm.createTransport({
+        service: 'gmail',
+        auth: { user: gmailUser, pass: gmailPass }
+      });
+    }
+  } catch(e) {
+    console.error('Transporter setup failed:', e.message);
   }
   return null;
 }
