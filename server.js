@@ -266,7 +266,7 @@ app.post('/api/auth/send-verification', async (req, res) => {
       .input('to_email', sql.NVarChar(255), email.toLowerCase())
       .input('type',     sql.NVarChar(20),  'verification')
       .input('subject',  sql.NVarChar(255), subject)
-      .input('status',   sql.NVarChar(10),  emailSent ? 'sent' : 'logged')
+      .input('status',   sql.NVarChar(10),  emailSent ? 'sent' : 'failed')
       .execute('dbo.sp_LogEmail')
     ).catch(e => console.error('Email log to DB failed (non-critical):', e.message));
 
