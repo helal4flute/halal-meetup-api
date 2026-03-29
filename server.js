@@ -35,6 +35,19 @@ console.log('  user    :', dbConfig.user);
 console.log('  port    :', dbConfig.port);
 
 let pool = null;
+
+// ── Email transporter (Gmail SMTP primary, SendGrid fallback) ──
+function createTransporter() {
+  const gmailUser = cleanEnv(process.env.GMAIL_USER);
+  const gmailPass = cleanEnv(process.env.GMAIL_APP_PASSWORD);
+  if (gmailUser && gmailPass) {
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: { user: gmailUser, pass: gmailPass }
+    });
+  }
+  return null;
+}
 async function getPool() {
   if (!pool) { pool = await sql.connect(dbConfig); }
   return pool;
@@ -211,26 +224,42 @@ app.post('/api/auth/send-verification', async (req, res) => {
       'infohalalmeetup@gmail.com',
     ].join('\n');
 
-    // ── Try SendGrid first ──────────────────────────────────
+    // ── Try Gmail SMTP first (most reliable for Gmail recipients) ──
     let emailSent = false;
-    if (cleanEnv(process.env.SENDGRID_API_KEY)) {
+    const transporter = createTransporter();
+    if (transporter) {
+      try {
+        await transporter.sendMail({
+          from: '"Halal-MeetUp" <' + (cleanEnv(process.env.GMAIL_USER) || cleanEnv(process.env.FROM_EMAIL, 'infohalalmeetup@gmail.com')) + '>',
+          to: email,
+          subject: subject,
+          text: emailBody,
+          html: '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;"><h2 style="color:#0d7377;">Halal-MeetUp</h2><p>Assalamu Alaikum ' + (name||'Member') + ',</p><p>Your email verification code is:</p><div style="background:#f0f9f9;border:2px solid #0d7377;border-radius:10px;padding:20px;text-align:center;margin:20px 0;"><span style="font-size:36px;font-weight:bold;letter-spacing:8px;color:#0d7377;">' + code + '</span></div><p style="color:#666;font-size:14px;">This code expires in 10 minutes.</p><p style="color:#666;font-size:14px;">If you did not sign up, please ignore this email.</p><hr style="border:none;border-top:1px solid #eee;margin:20px 0;"><p style="color:#999;font-size:12px;">JazakAllah khayr,<br>The Halal-MeetUp Team<br>infohalalmeetup@gmail.com</p></div>',
+        });
+        emailSent = true;
+        console.log('[EMAIL SENT via Gmail] To:', email, '| Code:', code);
+      } catch (gmailErr) {
+        console.error('[Gmail failed]:', gmailErr.message);
+      }
+    }
+
+    // ── Fallback: SendGrid ────────────────────────────────────
+    if (!emailSent && cleanEnv(process.env.SENDGRID_API_KEY)) {
       try {
         const https = require('https');
-        const payload = JSON.stringify({
+        const sgPayload = JSON.stringify({
           personalizations: [{ to: [{ email: email, name: name || '' }] }],
-          from: { email: cleanEnv(process.env.FROM_EMAIL) || 'infohalalmeetup@gmail.com', name: 'Halal-MeetUp' },
+          from: { email: cleanEnv(process.env.FROM_EMAIL, 'infohalalmeetup@gmail.com'), name: 'Halal-MeetUp' },
           subject: subject,
           content: [{ type: 'text/plain', value: emailBody }],
         });
         await new Promise((resolve, reject) => {
           const req2 = https.request({
-            hostname: 'api.sendgrid.com',
-            path: '/v3/mail/send',
-            method: 'POST',
+            hostname: 'api.sendgrid.com', path: '/v3/mail/send', method: 'POST',
             headers: {
               'Authorization': 'Bearer ' + cleanEnv(process.env.SENDGRID_API_KEY),
               'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(payload),
+              'Content-Length': Buffer.byteLength(sgPayload),
             },
           }, (res2) => {
             res2.on('data', () => {});
@@ -240,7 +269,7 @@ app.post('/api/auth/send-verification', async (req, res) => {
             });
           });
           req2.on('error', reject);
-          req2.write(payload);
+          req2.write(sgPayload);
           req2.end();
         });
         emailSent = true;
@@ -249,7 +278,6 @@ app.post('/api/auth/send-verification', async (req, res) => {
         console.error('[SendGrid failed]:', sgErr.message);
       }
     }
-
     // ── Log to console regardless ────────────────────────────
     if (!emailSent) {
       console.log('============================================');
