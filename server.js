@@ -722,21 +722,59 @@ app.get('/api/subscriptions/me', auth, async (req, res) => {
 // ── CALL LOGS ─────────────────────────────────────────────────
 app.post('/api/calls', auth, async (req, res) => {
   try {
-    const { match_id,receiver_id,call_type,status,duration_seconds=0 } = req.body;
-    if (!match_id||!receiver_id||!call_type||!status) return err(res,'Missing fields.');
-    const db = await getPool();
+    const { to_user_id, call_type, sdp_offer } = req.body;
+    if (!to_user_id || !call_type) return err(res, 'to_user_id and call_type required.');
+    const db  = await getPool();
+    const cR  = await db.request().input('uid',sql.NVarChar(36),req.user.id)
+      .query("SELECT first_name,last_name FROM dbo.users WHERE id=@uid");
+    const cr  = cR.recordset[0]||{};
+    const callId = require('crypto').randomBytes(16).toString('hex');
+    const callerName = (cr.first_name||'')+(cr.last_name?' '+cr.last_name[0]+'.':'');
     await db.request()
-      .input('match_id',         sql.NVarChar(36),match_id)
-      .input('caller_id',        sql.NVarChar(36),req.user.id)
-      .input('receiver_id',      sql.NVarChar(36),receiver_id)
-      .input('call_type',        sql.NVarChar(10),call_type)
-      .input('status',           sql.NVarChar(15),status)
-      .input('duration_seconds', sql.Int,         duration_seconds)
-      .query(`INSERT INTO dbo.call_logs(match_id,caller_id,receiver_id,call_type,status,duration_seconds)
-              VALUES(@match_id,@caller_id,@receiver_id,@call_type,@status,@duration_seconds)`);
-    return ok(res,{message:'Logged.'},201);
-  } catch(e) { return err(res,'Failed.',500); }
+      .input('id',          sql.NVarChar(36),      callId)
+      .input('cid',         sql.NVarChar(36),      req.user.id)
+      .input('rid',         sql.NVarChar(36),      to_user_id)
+      .input('ctype',       sql.NVarChar(10),      call_type)
+      .input('stat',        sql.NVarChar(15),      'ringing')
+      .input('sdp',         sql.NVarChar(sql.MAX), sdp_offer||'')
+      .input('cname',       sql.NVarChar(200),     callerName)
+      .query("INSERT INTO dbo.call_logs(id,caller_id,receiver_id,call_type,status,sdp_offer,caller_name,duration_seconds) VALUES(@id,@cid,@rid,@ctype,@stat,@sdp,@cname,0)");
+    return ok(res, { call_id: callId, status: 'ringing' }, 201);
+  } catch(e) { console.error('Call POST:', e.message); return err(res,'Failed: '+e.message,500); }
 });
+
+// Get single call (for polling)
+app.get('/api/calls/:id', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const r  = await db.request()
+      .input('id',  sql.NVarChar(36), req.params.id)
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query("SELECT id,caller_id,receiver_id,call_type,status,sdp_offer,sdp_answer,caller_name,created_at FROM dbo.call_logs WHERE id=@id AND (caller_id=@uid OR receiver_id=@uid)");
+    if (!r.recordset.length) return err(res, 'Call not found.', 404);
+    return ok(res, r.recordset[0]);
+  } catch(e) { return err(res, 'Failed.', 500); }
+});
+
+// Answer/update call status + SDP answer
+app.patch('/api/calls/:id/answer', auth, async (req, res) => {
+  try {
+    const { status, sdp_answer } = req.body;
+    const db = await getPool();
+    const sets = ["status=@status"];
+    const rq   = db.request()
+      .input('id',     sql.NVarChar(36), req.params.id)
+      .input('uid',    sql.NVarChar(36), req.user.id)
+      .input('status', sql.NVarChar(15), status || 'ended');
+    if (sdp_answer) { sets.push("sdp_answer=@sdp"); rq.input('sdp', sql.NVarChar(sql.MAX), sdp_answer); }
+    if (status === 'ended' || status === 'declined') {
+      sets.push("ended_at=SYSUTCDATETIME()");
+    }
+    await rq.query("UPDATE dbo.call_logs SET " + sets.join(',') + " WHERE id=@id AND (caller_id=@uid OR receiver_id=@uid)");
+    return ok(res, { updated: true });
+  } catch(e) { return err(res, 'Failed.', 500); }
+});
+
 
 app.get('/api/calls', auth, async (req, res) => {
   try {
@@ -770,7 +808,39 @@ app.post('/api/reports', auth, async (req, res) => {
 });
 
 // ── NOTIFICATIONS ─────────────────────────────────────────────
-app.get('/api/notifications', auth, async (req, res) => {
+app.
+// Send notification (used by call system)
+app.post('/api/notifications', auth, async (req, res) => {
+  try {
+    const { to_user_id, type, title, body, related_match_id, call_id, call_type } = req.body;
+    if (!to_user_id || !title) return err(res, 'to_user_id and title required.');
+    const db = await getPool();
+    await db.request()
+      .input('uid',   sql.NVarChar(36),  to_user_id)
+      .input('type',  sql.NVarChar(20),  type || 'system')
+      .input('title', sql.NVarChar(200), title)
+      .input('body',  sql.NVarChar(500), body || '')
+      .input('fuid',  sql.NVarChar(36),  req.user.id)
+      .input('cid',   sql.NVarChar(36),  call_id || null)
+      .query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,call_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,@cid,0)");
+    return ok(res, { sent: true }, 201);
+  } catch(e) {
+    // call_id column may not exist yet — retry without it
+    try {
+      const db2 = await getPool();
+      await db2.request()
+        .input('uid',   sql.NVarChar(36),  to_user_id)
+        .input('type',  sql.NVarChar(20),  type || 'system')
+        .input('title', sql.NVarChar(200), title)
+        .input('body',  sql.NVarChar(500), body || '')
+        .input('fuid',  sql.NVarChar(36),  req.user.id)
+        .query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,0)");
+      return ok(res, { sent: true }, 201);
+    } catch(e2) { return err(res, 'Failed.', 500); }
+  }
+});
+
+get('/api/notifications', auth, async (req, res) => {
   try {
     const db = await getPool();
     const r  = await db.request().input('uid',sql.NVarChar(36),req.user.id)
@@ -878,7 +948,34 @@ async function start() {
   } catch(e) {
     console.error('⚠️  DB connect failed (will retry on first request):', e.message);
   }
-  app.listen(PORT, () => {
+  
+// Run DB migration for call_logs (add WebRTC columns if not exists)
+async function migrateCallLogs() {
+  try {
+    const db = await getPool();
+    const cols = await db.request().query(
+      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='call_logs'"
+    );
+    const existing = cols.recordset.map(r => r.COLUMN_NAME.toLowerCase());
+    const toAdd = [];
+    if (!existing.includes('sdp_offer'))   toAdd.push("ALTER TABLE dbo.call_logs ADD sdp_offer NVARCHAR(MAX) NULL");
+    if (!existing.includes('sdp_answer'))  toAdd.push("ALTER TABLE dbo.call_logs ADD sdp_answer NVARCHAR(MAX) NULL");
+    if (!existing.includes('caller_name')) toAdd.push("ALTER TABLE dbo.call_logs ADD caller_name NVARCHAR(200) NULL");
+    if (!existing.includes('ended_at'))    toAdd.push("ALTER TABLE dbo.call_logs ADD ended_at DATETIME2 NULL");
+    if (!existing.includes('id'))          toAdd.push("ALTER TABLE dbo.call_logs ADD id NVARCHAR(36) DEFAULT NEWID()");
+    for (const sql_stmt of toAdd) {
+      await db.request().query(sql_stmt);
+      console.log('Migration:', sql_stmt);
+    }
+    if (toAdd.length > 0) console.log('[DB] call_logs migrated:', toAdd.length, 'columns added');
+  } catch(e) {
+    console.error('[DB Migration] call_logs:', e.message);
+  }
+}
+
+migrateCallLogs();
+
+app.listen(PORT, () => {
     console.log('\n🚀 Halal-MeetUp API on port ' + PORT);
     console.log('   Admin : ' + cleanEnv(process.env.ADMIN_EMAIL, 'mdhelal.ahamed@gmail.com'));
     console.log('   Email : ' + cleanEnv(process.env.FROM_EMAIL,  'infohalalmeetup@gmail.com') + '\n');
