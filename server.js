@@ -88,6 +88,31 @@ app.post('/api/auth/register', async (req, res) => {
       .execute('dbo.sp_RegisterUser');
     const user  = r.recordset[0];
     const token = signToken(user);
+
+    // Send welcome email
+    const welcomeBody = [
+      'Assalamu Alaikum '+first_name+',',
+      '',
+      'Welcome to Halal-MeetUp! Your account has been created successfully.',
+      '',
+      'GETTING STARTED',
+      '1. Complete your profile — upload photos and write a genuine bio.',
+      '2. Discover matches — swipe right to like.',
+      '3. Chat — text chat is free with all your matches.',
+      '',
+      'PREMIUM ($10/week): Audio & Video calls · Ludo game · Live photos',
+      'Cancel anytime from My Profile > Settings.',
+      '',
+      'SAFETY: All profiles are ID-verified. Complete yours in the app.',
+      '',
+      'Need help? infohalalmeetup@gmail.com',
+      '',
+      'JazakAllah khayr,',
+      'The Halal-MeetUp Team'
+    ].join('\n');
+    sendEmail(email,'welcome','Welcome to Halal-MeetUp! 🌙',welcomeBody)
+      .catch(e=>console.error('Welcome email failed:',e.message));
+
     return ok(res, { user, token }, 201);
   } catch(e) {
     if (e.message?.includes('already registered')) return err(res,'Email already registered.');
@@ -126,6 +151,112 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// ── In-memory verification code store (use Redis in production) ──
+const verificationCodes = new Map(); // email -> {code, expires, name}
+
+// Send email verification code
+app.post('/api/auth/send-verification', async (req, res) => {
+  try {
+    const { email, name } = req.body;
+    if (!email || !email.includes('@')) return err(res, 'Valid email is required.');
+
+    // Check email not already registered
+    const db = await getPool();
+    const existing = await db.request()
+      .input('email', sql.NVarChar(255), email.toLowerCase())
+      .query(`SELECT id FROM dbo.users WHERE email = @email`);
+    if (existing.recordset.length)
+      return err(res, 'This email is already registered. Please log in instead.');
+
+    // Generate 6-digit code
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
+    verificationCodes.set(email.toLowerCase(), { code, expires, name });
+
+    // Log the email attempt
+    await db.request()
+      .input('to_email', sql.NVarChar(255), email.toLowerCase())
+      .input('type',     sql.NVarChar(20),  'verification')
+      .input('subject',  sql.NVarChar(255), 'Your Halal-MeetUp verification code')
+      .input('status',   sql.NVarChar(10),  'sent')
+      .execute('dbo.sp_LogEmail');
+
+    // Build email body
+    const emailBody = [
+      'Assalamu Alaikum ' + (name || 'Member') + ',',
+      '',
+      'Thank you for signing up to Halal-MeetUp!',
+      '',
+      'Your email verification code is:',
+      '',
+      '  ➤  ' + code,
+      '',
+      'Enter this code in the app to continue your registration.',
+      'This code expires in 10 minutes.',
+      '',
+      'If you did not create an account, please ignore this email.',
+      '',
+      'JazakAllah khayr,',
+      'The Halal-MeetUp Team',
+      (process.env.FROM_EMAIL || 'infohalalmeetup@gmail.com'),
+    ].join('\n');
+
+    // In production: send via SendGrid
+    // const sgMail = require('@sendgrid/mail');
+    // sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+    // await sgMail.send({
+    //   to: email,
+    //   from: { email: process.env.FROM_EMAIL, name: 'Halal-MeetUp' },
+    //   subject: 'Your Halal-MeetUp verification code: ' + code,
+    //   text: emailBody,
+    // });
+
+    // For now: log the code (visible in Railway logs)
+    console.log(`[VERIFICATION EMAIL]`);
+    console.log(`  To:      ${email}`);
+    console.log(`  Name:    ${name}`);
+    console.log(`  Code:    ${code}`);
+    console.log(`  Expires: ${new Date(expires).toISOString()}`);
+    console.log(`  Body:\n${emailBody}`);
+
+    // Return code in response ONLY in development (remove in prod)
+    const isDev = process.env.NODE_ENV !== 'production';
+    return ok(res, {
+      message: 'Verification code sent.',
+      code: isDev ? code : undefined, // visible in dev, hidden in prod
+    }, 200);
+
+  } catch (e) {
+    console.error('send-verification error:', e.message);
+    return err(res, 'Failed to send verification email. Please try again.', 500);
+  }
+});
+
+// Verify the email code
+app.post('/api/auth/verify-email', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) return err(res, 'Email and code are required.');
+
+    const stored = verificationCodes.get(email.toLowerCase());
+    if (!stored)
+      return err(res, 'No verification code found. Please request a new one.');
+    if (Date.now() > stored.expires)
+      return err(res, 'Code has expired. Please request a new one.');
+    if (stored.code !== code.toString().trim())
+      return err(res, 'Incorrect code. Please try again.');
+
+    // Code is valid — mark as verified
+    verificationCodes.delete(email.toLowerCase());
+    return ok(res, { verified: true, message: 'Email verified successfully.' });
+
+  } catch (e) {
+    console.error('verify-email error:', e.message);
+    return err(res, 'Verification failed. Please try again.', 500);
+  }
+});
+
+// Old OTP stub — keep for backward compatibility
 app.post('/api/auth/logout', auth, async (req, res) => {
   try {
     const db = await getPool();
