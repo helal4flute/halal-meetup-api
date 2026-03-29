@@ -54,9 +54,14 @@ app.post('/api/auth/register', async (req, res) => {
             gender, sect, marital_status, education, country, city,
             nationality, languages, occupation, bio, interests,
             photo_1='', photo_2='', photo_3='' } = req.body;
-    if (!first_name||!last_name||!email||!password||!phone||!dob)
-      return err(res, 'Missing required fields.');
-    if (password.length < 8) return err(res, 'Password must be at least 8 characters.');
+    // Validate core required fields individually for clear error messages
+    if (!first_name||!first_name.trim()) return err(res, 'First name is required.');
+    if (!last_name||!last_name.trim())   return err(res, 'Last name is required.');
+    if (!email||!email.trim())           return err(res, 'Email is required.');
+    if (!password)                       return err(res, 'Password is required.');
+    if (password.length < 8)            return err(res, 'Password must be at least 8 characters.');
+    if (!phone||!phone.trim())           return err(res, 'Phone number is required.');
+    if (!dob)                            return err(res, 'Date of birth is required.');
     const hash = await bcrypt.hash(password, 12);
     const db   = await getPool();
     const r    = await db.request()
@@ -66,15 +71,15 @@ app.post('/api/auth/register', async (req, res) => {
       .input('password_hash',  sql.NVarChar(255), hash)
       .input('phone',          sql.NVarChar(20),  phone)
       .input('dob',            sql.Date,          new Date(dob))
-      .input('gender',         sql.NVarChar(10),  gender||'')
-      .input('sect',           sql.NVarChar(100), sect||'')
+      .input('gender',         sql.NVarChar(10),  gender||''||'')
+      .input('sect',           sql.NVarChar(100), sect||''||'')
       .input('marital_status', sql.NVarChar(30),  marital_status||'Never Married')
-      .input('education',      sql.NVarChar(100), education||'')
-      .input('country',        sql.NVarChar(100), country||'')
-      .input('city',           sql.NVarChar(100), city||'')
-      .input('nationality',    sql.NVarChar(100), nationality||'')
-      .input('languages',      sql.NVarChar(255), languages||'')
-      .input('occupation',     sql.NVarChar(150), occupation||'')
+      .input('education',      sql.NVarChar(100), education||''||'')
+      .input('country',        sql.NVarChar(100), country||''||'')
+      .input('city',           sql.NVarChar(100), city||''||'')
+      .input('nationality',    sql.NVarChar(100), nationality||''||'')
+      .input('languages',      sql.NVarChar(255), languages||''||'')
+      .input('occupation',     sql.NVarChar(150), occupation||''||'')
       .input('bio',            sql.NVarChar(sql.MAX), bio||'')
       .input('interests',      sql.NVarChar(sql.MAX), interests||'')
       .input('photo_1',        sql.NVarChar(500), photo_1)
