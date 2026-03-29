@@ -19,10 +19,10 @@ function cleanEnv(val, fallback) {
 
 const dbConfig = {
   server:   cleanEnv(process.env.DB_SERVER),
-  database: cleanEnv(process.env.DB_NAME,   'HalalMeetUp'),
+  database: cleanEnv(process.env.DB_NAME, 'HalalMeetUp'),
   user:     cleanEnv(process.env.DB_USER),
   password: cleanEnv(process.env.DB_PASSWORD),
-  port:     parseInt(cleanEnv(process.env.DB_PORT, '1433')),
+  port:     parseInt(cleanEnv(process.env.DB_PORT, '1433'), 10),
   options:  { encrypt: true, enableArithAbort: true, trustServerCertificate: false },
   pool:     { max: 10, min: 0, idleTimeoutMillis: 30000 }
 };
@@ -49,7 +49,7 @@ app.get('/api/health', (req, res) => res.json({ app: 'Halal-MeetUp API', status:
 
 function signToken(user) {
   return jwt.sign({ id: user.id, email: user.email, role: user.role },
-    process.env.JWT_SECRET || 'dev-secret', { expiresIn: '7d' });
+    cleanEnv(process.env.JWT_SECRET) || 'dev-secret', { expiresIn: '7d' });
 }
 function ok(res, data, status=200) { return res.status(status).json({ success: true, data }); }
 function err(res, msg, status=400) { return res.status(status).json({ success: false, error: msg }); }
@@ -57,7 +57,7 @@ function err(res, msg, status=400) { return res.status(status).json({ success: f
 function auth(req, res, next) {
   const token = (req.headers.authorization || '').replace('Bearer ', '');
   if (!token) return err(res, 'Authentication required.', 401);
-  try { req.user = jwt.verify(token, process.env.JWT_SECRET || 'dev-secret'); next(); }
+  try { req.user = jwt.verify(token, cleanEnv(process.env.JWT_SECRET) || 'dev-secret'); next(); }
   catch { return err(res, 'Invalid or expired token.', 401); }
 }
 
@@ -213,12 +213,12 @@ app.post('/api/auth/send-verification', async (req, res) => {
 
     // ── Try SendGrid first ──────────────────────────────────
     let emailSent = false;
-    if (process.env.SENDGRID_API_KEY) {
+    if (cleanEnv(process.env.SENDGRID_API_KEY)) {
       try {
         const https = require('https');
         const payload = JSON.stringify({
           personalizations: [{ to: [{ email: email, name: name || '' }] }],
-          from: { email: process.env.FROM_EMAIL || 'infohalalmeetup@gmail.com', name: 'Halal-MeetUp' },
+          from: { email: cleanEnv(process.env.FROM_EMAIL) || 'infohalalmeetup@gmail.com', name: 'Halal-MeetUp' },
           subject: subject,
           content: [{ type: 'text/plain', value: emailBody }],
         });
@@ -228,7 +228,7 @@ app.post('/api/auth/send-verification', async (req, res) => {
             path: '/v3/mail/send',
             method: 'POST',
             headers: {
-              'Authorization': 'Bearer ' + process.env.SENDGRID_API_KEY,
+              'Authorization': 'Bearer ' + cleanEnv(process.env.SENDGRID_API_KEY),
               'Content-Type': 'application/json',
               'Content-Length': Buffer.byteLength(payload),
             },
@@ -698,9 +698,9 @@ async function start() {
     console.error('⚠️  DB connect failed (will retry on first request):', e.message);
   }
   app.listen(PORT, () => {
-    console.log(`\n🚀 Halal-MeetUp API on port ${PORT}`);
-    console.log(`   Admin : ${process.env.ADMIN_EMAIL||'mdhelal.ahamed@gmail.com'}`);
-    console.log(`   Email : ${process.env.FROM_EMAIL||'infohalalmeetup@gmail.com'}\n`);
+    console.log('\n🚀 Halal-MeetUp API on port ' + PORT);
+    console.log('   Admin : ' + cleanEnv(process.env.ADMIN_EMAIL, 'mdhelal.ahamed@gmail.com'));
+    console.log('   Email : ' + cleanEnv(process.env.FROM_EMAIL,  'infohalalmeetup@gmail.com') + '\n');
   });
 }
 start();
