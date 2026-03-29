@@ -90,6 +90,20 @@ app.post('/api/auth/register', async (req, res) => {
     if (!phone||!phone.trim())           return err(res, 'Phone number is required.');
     if (!dob)                            return err(res, 'Date of birth is required.');
     const hash = await bcrypt.hash(password, 12);
+
+    // Sanitise CHECK-constrained fields — default to valid values
+    const safeGender  = ['Male','Female'].includes(gender) ? gender : 'Male';
+    const safeStatus  = ['Never Married','Divorced','Widowed'].includes(marital_status)
+                        ? marital_status : 'Never Married';
+    // Parse DOB safely
+    let safeDob;
+    try {
+      safeDob = new Date(dob);
+      if (isNaN(safeDob.getTime())) throw new Error('Invalid date');
+    } catch {
+      return err(res, 'Invalid date of birth. Please use YYYY-MM-DD format.');
+    }
+
     const db   = await getPool();
     const r    = await db.request()
       .input('first_name',     sql.NVarChar(100), first_name)
@@ -97,10 +111,10 @@ app.post('/api/auth/register', async (req, res) => {
       .input('email',          sql.NVarChar(255), email.toLowerCase())
       .input('password_hash',  sql.NVarChar(255), hash)
       .input('phone',          sql.NVarChar(20),  phone)
-      .input('dob',            sql.Date,          new Date(dob))
-      .input('gender',         sql.NVarChar(10),  gender||''||'')
+      .input('dob',            sql.Date,          safeDob)
+      .input('gender',         sql.NVarChar(10),  safeGender)
       .input('sect',           sql.NVarChar(100), sect||''||'')
-      .input('marital_status', sql.NVarChar(30),  marital_status||'Never Married')
+      .input('marital_status', sql.NVarChar(30),  safeStatus)
       .input('education',      sql.NVarChar(100), education||''||'')
       .input('country',        sql.NVarChar(100), country||''||'')
       .input('city',           sql.NVarChar(100), city||''||'')
@@ -143,9 +157,13 @@ app.post('/api/auth/register', async (req, res) => {
     return ok(res, { user, token }, 201);
   } catch(e) {
     if (e.message?.includes('already registered')) return err(res,'Email already registered.');
-    if (e.message?.includes('18 years'))           return err(res,'Must be at least 18 years old.');
-    console.error('Register:', e.message);
-    return err(res, 'Registration failed.', 500);
+    if (e.message?.includes('18 years'))           return err(res,'You must be at least 18 years old.');
+    if (e.message?.includes('CHECK constraint'))   return err(res,'Invalid profile data: ' + e.message);
+    if (e.message?.includes('NOT NULL'))           return err(res,'Missing required field: ' + e.message);
+    console.error('Register error:', e.message);
+    // Return the actual error message in development for easier debugging
+    const isDev = process.env.NODE_ENV !== 'production';
+    return err(res, isDev ? ('Registration failed: ' + e.message) : 'Registration failed. Please try again.', 500);
   }
 });
 
