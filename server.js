@@ -160,75 +160,115 @@ app.post('/api/auth/send-verification', async (req, res) => {
     const { email, name } = req.body;
     if (!email || !email.includes('@')) return err(res, 'Valid email is required.');
 
-    // Check email not already registered
-    const db = await getPool();
-    const existing = await db.request()
-      .input('email', sql.NVarChar(255), email.toLowerCase())
-      .query(`SELECT id FROM dbo.users WHERE email = @email`);
-    if (existing.recordset.length)
-      return err(res, 'This email is already registered. Please log in instead.');
+    // Check email not already registered (non-blocking — DB might be slow)
+    try {
+      const db = await getPool();
+      const existing = await db.request()
+        .input('email', sql.NVarChar(255), email.toLowerCase())
+        .query('SELECT id FROM dbo.users WHERE email = @email');
+      if (existing.recordset.length)
+        return err(res, 'This email is already registered. Please log in instead.');
+    } catch (dbErr) {
+      console.error('DB check failed (continuing):', dbErr.message);
+      // Continue — don't block sign-up if DB is slow
+    }
 
-    // Generate 6-digit code
+    // Generate 6-digit code, store in memory (10 min expiry)
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const expires = Date.now() + 10 * 60 * 1000;
     verificationCodes.set(email.toLowerCase(), { code, expires, name });
 
-    // Log the email attempt
-    await db.request()
-      .input('to_email', sql.NVarChar(255), email.toLowerCase())
-      .input('type',     sql.NVarChar(20),  'verification')
-      .input('subject',  sql.NVarChar(255), 'Your Halal-MeetUp verification code')
-      .input('status',   sql.NVarChar(10),  'sent')
-      .execute('dbo.sp_LogEmail');
-
-    // Build email body
+    // Build the verification email
+    const subject = 'Your Halal-MeetUp verification code: ' + code;
     const emailBody = [
       'Assalamu Alaikum ' + (name || 'Member') + ',',
       '',
-      'Thank you for signing up to Halal-MeetUp!',
+      'Your Halal-MeetUp email verification code is:',
       '',
-      'Your email verification code is:',
+      '    ' + code,
       '',
-      '  ➤  ' + code,
-      '',
-      'Enter this code in the app to continue your registration.',
+      'Enter this code in the app to complete your registration.',
       'This code expires in 10 minutes.',
       '',
-      'If you did not create an account, please ignore this email.',
+      'If you did not sign up for Halal-MeetUp, please ignore this email.',
       '',
       'JazakAllah khayr,',
       'The Halal-MeetUp Team',
-      (process.env.FROM_EMAIL || 'infohalalmeetup@gmail.com'),
+      'infohalalmeetup@gmail.com',
     ].join('\n');
 
-    // In production: send via SendGrid
-    // const sgMail = require('@sendgrid/mail');
-    // sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-    // await sgMail.send({
-    //   to: email,
-    //   from: { email: process.env.FROM_EMAIL, name: 'Halal-MeetUp' },
-    //   subject: 'Your Halal-MeetUp verification code: ' + code,
-    //   text: emailBody,
-    // });
+    // ── Try SendGrid first ──────────────────────────────────
+    let emailSent = false;
+    if (process.env.SENDGRID_API_KEY) {
+      try {
+        const https = require('https');
+        const payload = JSON.stringify({
+          personalizations: [{ to: [{ email: email, name: name || '' }] }],
+          from: { email: process.env.FROM_EMAIL || 'infohalalmeetup@gmail.com', name: 'Halal-MeetUp' },
+          subject: subject,
+          content: [{ type: 'text/plain', value: emailBody }],
+        });
+        await new Promise((resolve, reject) => {
+          const req2 = https.request({
+            hostname: 'api.sendgrid.com',
+            path: '/v3/mail/send',
+            method: 'POST',
+            headers: {
+              'Authorization': 'Bearer ' + process.env.SENDGRID_API_KEY,
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(payload),
+            },
+          }, (res2) => {
+            res2.on('data', () => {});
+            res2.on('end', () => {
+              if (res2.statusCode >= 200 && res2.statusCode < 300) resolve();
+              else reject(new Error('SendGrid status ' + res2.statusCode));
+            });
+          });
+          req2.on('error', reject);
+          req2.write(payload);
+          req2.end();
+        });
+        emailSent = true;
+        console.log('[EMAIL SENT via SendGrid] To:', email, '| Code:', code);
+      } catch (sgErr) {
+        console.error('[SendGrid failed]:', sgErr.message);
+      }
+    }
 
-    // For now: log the code (visible in Railway logs)
-    console.log(`[VERIFICATION EMAIL]`);
-    console.log(`  To:      ${email}`);
-    console.log(`  Name:    ${name}`);
-    console.log(`  Code:    ${code}`);
-    console.log(`  Expires: ${new Date(expires).toISOString()}`);
-    console.log(`  Body:\n${emailBody}`);
+    // ── Log to console regardless ────────────────────────────
+    if (!emailSent) {
+      console.log('============================================');
+      console.log('[VERIFICATION CODE - check Railway logs]');
+      console.log('  To:   ', email);
+      console.log('  Name: ', name);
+      console.log('  Code: ', code);
+      console.log('  Exp:  ', new Date(expires).toLocaleString());
+      console.log('============================================');
+    }
 
-    // Return code in response ONLY in development (remove in prod)
-    const isDev = process.env.NODE_ENV !== 'production';
+    // ── Log to DB (non-blocking) ─────────────────────────────
+    getPool().then(db => db.request()
+      .input('to_email', sql.NVarChar(255), email.toLowerCase())
+      .input('type',     sql.NVarChar(20),  'verification')
+      .input('subject',  sql.NVarChar(255), subject)
+      .input('status',   sql.NVarChar(10),  emailSent ? 'sent' : 'logged')
+      .execute('dbo.sp_LogEmail')
+    ).catch(e => console.error('Email log to DB failed (non-critical):', e.message));
+
+    // Always return success with the code (for testing without SendGrid)
     return ok(res, {
-      message: 'Verification code sent.',
-      code: isDev ? code : undefined, // visible in dev, hidden in prod
+      message: emailSent
+        ? 'Verification code sent to ' + email
+        : 'Verification code generated. Check Railway logs for the code.',
+      emailSent: emailSent,
+      // Return code in response when no SendGrid — so app can show it
+      code: !emailSent ? code : undefined,
     }, 200);
 
   } catch (e) {
-    console.error('send-verification error:', e.message);
-    return err(res, 'Failed to send verification email. Please try again.', 500);
+    console.error('send-verification critical error:', e.message);
+    return err(res, 'Server error. Please try again.', 500);
   }
 });
 
