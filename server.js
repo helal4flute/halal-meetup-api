@@ -10,15 +10,29 @@ const helmet  = require('helmet');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+// Strip any accidental spaces, equals signs, or quotes from env vars
+function cleanEnv(val, fallback) {
+  if (!val) return fallback || '';
+  // Remove leading/trailing whitespace, equals signs, quotes
+  return val.replace(/^[\s='"]+|[\s='"]+$/g, '').trim();
+}
+
 const dbConfig = {
-  server:   process.env.DB_SERVER   || '',
-  database: process.env.DB_NAME     || '',
-  user:     process.env.DB_USER     || '',
-  password: process.env.DB_PASSWORD || '',
-  port:     parseInt(process.env.DB_PORT || '1433'),
+  server:   cleanEnv(process.env.DB_SERVER),
+  database: cleanEnv(process.env.DB_NAME,   'HalalMeetUp'),
+  user:     cleanEnv(process.env.DB_USER),
+  password: cleanEnv(process.env.DB_PASSWORD),
+  port:     parseInt(cleanEnv(process.env.DB_PORT, '1433')),
   options:  { encrypt: true, enableArithAbort: true, trustServerCertificate: false },
   pool:     { max: 10, min: 0, idleTimeoutMillis: 30000 }
 };
+
+// Log cleaned config on startup (password hidden)
+console.log('[DB Config]');
+console.log('  server  :', dbConfig.server);
+console.log('  database:', dbConfig.database);
+console.log('  user    :', dbConfig.user);
+console.log('  port    :', dbConfig.port);
 
 let pool = null;
 async function getPool() {
