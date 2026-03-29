@@ -839,7 +839,7 @@ app.post('/api/notifications', auth, async (req, res) => {
   }
 });
 
-get('/api/notifications', auth, async (req, res) => {
+app.get('/api/notifications', auth, async (req, res) => {
   try {
     const db = await getPool();
     const r  = await db.request().input('uid',sql.NVarChar(36),req.user.id)
