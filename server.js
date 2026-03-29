@@ -36,7 +36,65 @@ console.log('  port    :', dbConfig.port);
 
 let pool = null;
 
-// Gmail SMTP removed — Railway blocks SMTP. Using SendGrid only.
+// ── General purpose email sender ────────────────────────────────
+async function sendEmail(toEmail, type, subject, body) {
+  const htmlBody = '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;">'
+    + '<div style="background:#0d7377;padding:16px 24px;border-radius:10px 10px 0 0;">'
+    + '<h1 style="color:#fff;margin:0;font-size:22px;">Halal-MeetUp</h1></div>'
+    + '<div style="background:#f9f9f9;padding:24px;border-radius:0 0 10px 10px;border:1px solid #e0e0e0;">'
+    + '<p style="color:#333;white-space:pre-line;line-height:1.6;">' + body.replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</p>'
+    + '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">'
+    + '<p style="color:#aaa;font-size:12px;">Halal-MeetUp Team · infohalalmeetup@gmail.com</p>'
+    + '</div></div>';
+  try {
+    await sendVerificationEmail(toEmail, '', '', subject, body, htmlBody);
+  } catch(e) {
+    console.error('sendEmail failed:', e.message);
+  }
+}
+
+// ── Verification email sender ────────────────────────────────────
+async function sendVerificationEmail(email, name, code, subject, emailBody, htmlBody) {
+  // Try SendGrid first
+  if (cleanEnv(process.env.SENDGRID_API_KEY)) {
+    try {
+      const https = require('https');
+      const sgPayload = JSON.stringify({
+        personalizations: [{ to: [{ email, name: name || '' }] }],
+        from: { email: cleanEnv(process.env.FROM_EMAIL, 'infohalalmeetup@gmail.com'), name: 'Halal-MeetUp' },
+        subject,
+        content: [
+          { type: 'text/plain', value: emailBody },
+          { type: 'text/html',  value: htmlBody  },
+        ],
+      });
+      await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: 'api.sendgrid.com', path: '/v3/mail/send', method: 'POST',
+          headers: {
+            'Authorization': 'Bearer ' + cleanEnv(process.env.SENDGRID_API_KEY),
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(sgPayload),
+          },
+        }, (res) => {
+          res.on('data', () => {});
+          res.on('end', () => {
+            if (res.statusCode >= 200 && res.statusCode < 300) resolve();
+            else reject(new Error('SendGrid ' + res.statusCode));
+          });
+        });
+        req.on('error', reject);
+        req.write(sgPayload);
+        req.end();
+      });
+      console.log('[EMAIL SENT via SendGrid] To:', email, '| Code:', code);
+      return true;
+    } catch (e) {
+      console.error('[SendGrid failed]:', e.message);
+    }
+  }
+  return false;
+}
 async function getPool() {
   if (!pool) { pool = await sql.connect(dbConfig); }
   return pool;
@@ -231,59 +289,24 @@ app.post('/api/auth/send-verification', async (req, res) => {
       'infohalalmeetup@gmail.com',
     ].join('\n');
 
-    // ── SendGrid (primary email provider) ──────────────────────
-    let emailSent = false;
-    if (cleanEnv(process.env.SENDGRID_API_KEY)) {
-      try {
-        const https = require('https');
-        const htmlBody = '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;">'
-          + '<div style="background:#0d7377;padding:16px 24px;border-radius:10px 10px 0 0;">'
-          + '<h1 style="color:#fff;margin:0;font-size:22px;">Halal-MeetUp</h1></div>'
-          + '<div style="background:#f9f9f9;padding:24px;border-radius:0 0 10px 10px;border:1px solid #e0e0e0;">'
-          + '<p style="color:#333;font-size:16px;">Assalamu Alaikum <strong>' + (name||'Member') + '</strong>,</p>'
-          + '<p style="color:#555;">Your email verification code is:</p>'
-          + '<div style="background:#fff;border:2px solid #0d7377;border-radius:12px;padding:24px;text-align:center;margin:20px 0;">'
-          + '<span style="font-size:40px;font-weight:bold;letter-spacing:10px;color:#0d7377;">' + code + '</span>'
-          + '</div>'
-          + '<p style="color:#888;font-size:13px;">This code expires in <strong>10 minutes</strong>.</p>'
-          + '<p style="color:#888;font-size:13px;">If you did not sign up for Halal-MeetUp, please ignore this email.</p>'
-          + '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">'
-          + '<p style="color:#aaa;font-size:12px;">JazakAllah khayr,<br><strong>The Halal-MeetUp Team</strong><br>infohalalmeetup@gmail.com</p>'
-          + '</div></div>';
-        const sgPayload = JSON.stringify({
-          personalizations: [{ to: [{ email: email, name: name || '' }] }],
-          from: { email: cleanEnv(process.env.FROM_EMAIL, 'infohalalmeetup@gmail.com'), name: 'Halal-MeetUp' },
-          subject: subject,
-          content: [
-            { type: 'text/plain', value: emailBody },
-            { type: 'text/html',  value: htmlBody  },
-          ],
-        });
-        await new Promise((resolve, reject) => {
-          const req2 = https.request({
-            hostname: 'api.sendgrid.com', path: '/v3/mail/send', method: 'POST',
-            headers: {
-              'Authorization': 'Bearer ' + cleanEnv(process.env.SENDGRID_API_KEY),
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(sgPayload),
-            },
-          }, (res2) => {
-            res2.on('data', () => {});
-            res2.on('end', () => {
-              if (res2.statusCode >= 200 && res2.statusCode < 300) resolve();
-              else reject(new Error('SendGrid status ' + res2.statusCode));
-            });
-          });
-          req2.on('error', reject);
-          req2.write(sgPayload);
-          req2.end();
-        });
-        emailSent = true;
-        console.log('[EMAIL SENT via SendGrid] To:', email, '| Code:', code);
-      } catch (sgErr) {
-        console.error('[SendGrid failed]:', sgErr.message);
-      }
-    }
+    // ── Build HTML email ─────────────────────────────────────────
+    const htmlBody = '<div style="font-family:Arial,sans-serif;max-width:500px;margin:0 auto;padding:24px;">'
+      + '<div style="background:#0d7377;padding:16px 24px;border-radius:10px 10px 0 0;">'
+      + '<h1 style="color:#fff;margin:0;font-size:22px;">Halal-MeetUp</h1></div>'
+      + '<div style="background:#f9f9f9;padding:24px;border-radius:0 0 10px 10px;border:1px solid #e0e0e0;">'
+      + '<p style="color:#333;font-size:16px;">Assalamu Alaikum <strong>' + (name||'Member') + '</strong>,</p>'
+      + '<p style="color:#555;">Your email verification code is:</p>'
+      + '<div style="background:#fff;border:2px solid #0d7377;border-radius:12px;padding:24px;text-align:center;margin:20px 0;">'
+      + '<span style="font-size:40px;font-weight:bold;letter-spacing:10px;color:#0d7377;">' + code + '</span>'
+      + '</div>'
+      + '<p style="color:#888;font-size:13px;">This code expires in <strong>10 minutes</strong>.</p>'
+      + '<p style="color:#888;font-size:13px;">If you did not sign up for Halal-MeetUp, please ignore this email.</p>'
+      + '<hr style="border:none;border-top:1px solid #eee;margin:20px 0;">'
+      + '<p style="color:#aaa;font-size:12px;">JazakAllah khayr,<br><strong>The Halal-MeetUp Team</strong><br>infohalalmeetup@gmail.com</p>'
+      + '</div></div>';
+
+    // ── Send via SendGrid ─────────────────────────────────────────
+    const emailSent = await sendVerificationEmail(email, name, code, subject, emailBody, htmlBody);
     // ── Log to console regardless ────────────────────────────
     if (!emailSent) {
       console.log('============================================');
