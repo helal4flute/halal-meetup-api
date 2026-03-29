@@ -814,28 +814,23 @@ app.post('/api/notifications', auth, async (req, res) => {
     const { to_user_id, type, title, body, related_match_id, call_id, call_type } = req.body;
     if (!to_user_id || !title) return err(res, 'to_user_id and title required.');
     const db = await getPool();
-    await db.request()
+    // Build query dynamically based on whether call_id provided
+    const rq2 = db.request()
       .input('uid',   sql.NVarChar(36),  to_user_id)
       .input('type',  sql.NVarChar(20),  type || 'system')
       .input('title', sql.NVarChar(200), title)
       .input('body',  sql.NVarChar(500), body || '')
-      .input('fuid',  sql.NVarChar(36),  req.user.id)
-      .input('cid',   sql.NVarChar(36),  call_id || null)
-      .query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,call_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,@cid,0)");
+      .input('fuid',  sql.NVarChar(36),  req.user.id);
+    if (call_id) {
+      rq2.input('cid', sql.NVarChar(36), call_id);
+      await rq2.query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,call_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,@cid,0)");
+    } else {
+      await rq2.query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,0)");
+    }
     return ok(res, { sent: true }, 201);
   } catch(e) {
-    // call_id column may not exist yet — retry without it
-    try {
-      const db2 = await getPool();
-      await db2.request()
-        .input('uid',   sql.NVarChar(36),  to_user_id)
-        .input('type',  sql.NVarChar(20),  type || 'system')
-        .input('title', sql.NVarChar(200), title)
-        .input('body',  sql.NVarChar(500), body || '')
-        .input('fuid',  sql.NVarChar(36),  req.user.id)
-        .query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,0)");
-      return ok(res, { sent: true }, 201);
-    } catch(e2) { return err(res, 'Failed.', 500); }
+    console.error('POST /api/notifications:', e.message);
+    return err(res, 'Failed to send notification.', 500);
   }
 });
 
@@ -843,7 +838,8 @@ app.get('/api/notifications', auth, async (req, res) => {
   try {
     const db = await getPool();
     const r  = await db.request().input('uid',sql.NVarChar(36),req.user.id)
-      .query(`SELECT TOP 50 id,type,title,body,related_user_id,related_match_id,is_read,created_at
+      .query(`SELECT TOP 50 id,type,title,body,related_user_id,related_match_id,
+                     ISNULL(call_id,'') AS call_id,is_read,created_at
               FROM dbo.notifications WHERE user_id=@uid ORDER BY created_at DESC`);
     return ok(res, r.recordset);
   } catch(e) { return err(res,'Failed.',500); }
@@ -952,23 +948,35 @@ async function start() {
 async function migrateCallLogs() {
   try {
     const db = await getPool();
-    const cols = await db.request().query(
+
+    // Migrate call_logs table
+    const callCols = await db.request().query(
       "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='call_logs'"
     );
-    const existing = cols.recordset.map(r => r.COLUMN_NAME.toLowerCase());
-    const toAdd = [];
-    if (!existing.includes('sdp_offer'))   toAdd.push("ALTER TABLE dbo.call_logs ADD sdp_offer NVARCHAR(MAX) NULL");
-    if (!existing.includes('sdp_answer'))  toAdd.push("ALTER TABLE dbo.call_logs ADD sdp_answer NVARCHAR(MAX) NULL");
-    if (!existing.includes('caller_name')) toAdd.push("ALTER TABLE dbo.call_logs ADD caller_name NVARCHAR(200) NULL");
-    if (!existing.includes('ended_at'))    toAdd.push("ALTER TABLE dbo.call_logs ADD ended_at DATETIME2 NULL");
-    if (!existing.includes('id'))          toAdd.push("ALTER TABLE dbo.call_logs ADD id NVARCHAR(36) DEFAULT NEWID()");
-    for (const sql_stmt of toAdd) {
-      await db.request().query(sql_stmt);
-      console.log('Migration:', sql_stmt);
-    }
-    if (toAdd.length > 0) console.log('[DB] call_logs migrated:', toAdd.length, 'columns added');
+    const callExisting = callCols.recordset.map(r => r.COLUMN_NAME.toLowerCase());
+    const callToAdd = [];
+    if (!callExisting.includes('sdp_offer'))   callToAdd.push("ALTER TABLE dbo.call_logs ADD sdp_offer NVARCHAR(MAX) NULL");
+    if (!callExisting.includes('sdp_answer'))  callToAdd.push("ALTER TABLE dbo.call_logs ADD sdp_answer NVARCHAR(MAX) NULL");
+    if (!callExisting.includes('caller_name')) callToAdd.push("ALTER TABLE dbo.call_logs ADD caller_name NVARCHAR(200) NULL");
+    if (!callExisting.includes('ended_at'))    callToAdd.push("ALTER TABLE dbo.call_logs ADD ended_at DATETIME2 NULL");
+    if (!callExisting.includes('id'))          callToAdd.push("ALTER TABLE dbo.call_logs ADD id NVARCHAR(36) NOT NULL DEFAULT NEWID()");
+    for (const s of callToAdd) { await db.request().query(s); console.log('[Migration]', s); }
+
+    // Migrate notifications table — add call_id if missing
+    const notifCols = await db.request().query(
+      "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='notifications'"
+    );
+    const notifExisting = notifCols.recordset.map(r => r.COLUMN_NAME.toLowerCase());
+    const notifToAdd = [];
+    if (!notifExisting.includes('call_id')) notifToAdd.push("ALTER TABLE dbo.notifications ADD call_id NVARCHAR(36) NULL");
+    for (const s of notifToAdd) { await db.request().query(s); console.log('[Migration]', s); }
+
+    if (callToAdd.length + notifToAdd.length > 0)
+      console.log('[DB] Migration complete:', callToAdd.length + notifToAdd.length, 'columns added');
+    else
+      console.log('[DB] Schema up to date');
   } catch(e) {
-    console.error('[DB Migration] call_logs:', e.message);
+    console.error('[DB Migration]:', e.message);
   }
 }
 
