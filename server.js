@@ -661,21 +661,46 @@ app.get('/api/matches/:id/messages', auth, async (req, res) => {
 
 app.post('/api/matches/:id/messages', auth, async (req, res) => {
   try {
-    const { text, to_user_id, blocked_reason=null } = req.body;
-    if (!text?.trim()) return err(res,'text required.');
-    if (!to_user_id)   return err(res,'to_user_id required.');
-    const db = await getPool();
-    const r  = await db.request()
-      .input('match_id',      sql.NVarChar(36),     req.params.id)
-      .input('from_user_id',  sql.NVarChar(36),     req.user.id)
-      .input('to_user_id',    sql.NVarChar(36),     to_user_id)
-      .input('text',          sql.NVarChar(sql.MAX),text.trim())
-      .input('blocked_reason',sql.NVarChar(20),     blocked_reason)
-      .execute('dbo.sp_SendMessage');
-    return ok(res, r.recordset[0], 201);
+    const { text, to_user_id, blocked_reason } = req.body;
+    if (!text || !text.trim()) return err(res, 'text required.');
+    const db  = await getPool();
+    const mid = req.params.id;
+    // Verify match exists and current user belongs to it
+    const mR = await db.request()
+      .input('mid', sql.NVarChar(36), mid)
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query("SELECT id, user1_id, user2_id FROM dbo.matches WHERE id=@mid AND (user1_id=@uid OR user2_id=@uid)");
+    if (!mR.recordset.length) return err(res, 'Match not found.', 403);
+    const match = mR.recordset[0];
+    // Determine to_user_id from match if not provided
+    const toId = to_user_id || (match.user1_id === req.user.id ? match.user2_id : match.user1_id);
+    const msgId = require('crypto').randomBytes(16).toString('hex');
+    const br    = blocked_reason || null;
+    await db.request()
+      .input('id',    sql.NVarChar(36),     msgId)
+      .input('mid',   sql.NVarChar(36),     mid)
+      .input('fid',   sql.NVarChar(36),     req.user.id)
+      .input('tid',   sql.NVarChar(36),     toId)
+      .input('txt',   sql.NVarChar(sql.MAX),text.trim())
+      .input('br',    sql.NVarChar(20),     br)
+      .query("INSERT INTO dbo.messages(id,match_id,from_user_id,to_user_id,[text],blocked_reason) VALUES(@id,@mid,@fid,@tid,@txt,@br)");
+    // Notify recipient (non-critical)
+    if (!br) {
+      db.request()
+        .input('uid',  sql.NVarChar(36),  toId)
+        .input('title',sql.NVarChar(200), 'New message')
+        .input('body', sql.NVarChar(500), text.trim().substring(0, 80))
+        .input('fuid', sql.NVarChar(36),  req.user.id)
+        .input('rmid', sql.NVarChar(36),  mid)
+        .query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,related_match_id,is_read) VALUES(@uid,'message',@title,@body,@fuid,@rmid,0)")
+        .catch(function(){});
+      // Push via SSE
+      pushToUser(toId, 'notification', { type:'message', title:'New message', body: text.trim().substring(0,80) });
+    }
+    return ok(res, { id: msgId, text: text.trim(), sent_at: new Date().toISOString() }, 201);
   } catch(e) {
-    if (e.message?.includes('Match not found')) return err(res,'Match not found.',403);
-    return err(res,'Failed.',500);
+    console.error('POST messages:', e.message);
+    return err(res, 'Failed to send message: ' + e.message, 500);
   }
 });
 
