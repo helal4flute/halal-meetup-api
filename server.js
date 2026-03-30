@@ -644,12 +644,19 @@ app.delete('/api/matches/:id', auth, async (req, res) => {
 app.get('/api/matches/:id/messages', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const r  = await db.request()
-      .input('match_id',        sql.NVarChar(36),req.params.id)
-      .input('requesting_user', sql.NVarChar(36),req.user.id)
-      .execute('dbo.sp_GetMessages');
+    // Mark messages as read
+    await db.request()
+      .input('mid', sql.NVarChar(36), req.params.id)
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query("UPDATE dbo.messages SET is_read=1,read_at=SYSUTCDATETIME() WHERE match_id=@mid AND to_user_id=@uid AND is_read=0")
+      .catch(function(){});
+    // Get messages
+    const r = await db.request()
+      .input('mid', sql.NVarChar(36), req.params.id)
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query("SELECT id,from_user_id,to_user_id,[text],blocked_reason,is_deleted,is_read,reactions,sent_at,read_at FROM dbo.messages WHERE match_id=@mid AND is_deleted=0 ORDER BY sent_at ASC");
     return ok(res, r.recordset);
-  } catch(e) { return err(res,'Failed.',500); }
+  } catch(e) { console.error('GET messages:', e.message); return err(res,'Failed.',500); }
 });
 
 app.post('/api/matches/:id/messages', auth, async (req, res) => {
@@ -954,13 +961,13 @@ app.get('/api/events', (req, res) => {
   // Send heartbeat every 15s to keep connection alive
   const hb = setInterval(() => {
     try { res.write('event: ping\ndata: {}\n\n'); }
-    catch(e) { clearInterval(hb); sseClients.delete(uid); }
+    catch(e) { clearInterval(hb); sseClients.delete(userId); }
   }, 15000);
 
   req.on('close', () => {
     clearInterval(hb);
     sseClients.delete(userId);
-    console.log('[SSE] Client disconnected:', uid);
+    console.log('[SSE] Client disconnected:', userId);
   });
 });
 
