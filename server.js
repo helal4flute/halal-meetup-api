@@ -433,7 +433,9 @@ app.get('/api/users/me', auth, async (req, res) => {
       .query(`SELECT u.id,u.first_name,u.last_name,u.email,u.phone,u.gender,u.sect,
                      u.marital_status,u.education,u.country,u.city,u.nationality,
                      u.languages,u.occupation,u.bio,u.interests,
-                     u.photo_1,u.photo_2,u.photo_3,
+                     CAST(u.photo_1 AS NVARCHAR(MAX)) AS photo_1,
+                     CAST(u.photo_2 AS NVARCHAR(MAX)) AS photo_2,
+                     CAST(u.photo_3 AS NVARCHAR(MAX)) AS photo_3,
                      DATEDIFF(YEAR,u.dob,GETDATE()) AS age,
                      u.id_verified,u.premium,u.sub_status,u.sub_renews_at,
                      u.online,u.last_seen,u.role,u.created_at,
@@ -471,13 +473,19 @@ app.get('/api/users/:id', auth, async (req, res) => {
   try {
     const db = await getPool();
     const r  = await db.request().input('id',sql.NVarChar(36),req.params.id)
-      .query(`SELECT id,first_name,last_name,age,gender,sect,marital_status,
-                     education,country,city,nationality,languages,occupation,
-                     bio,interests,photo_1,photo_2,photo_3,id_verified,online,last_seen
-              FROM dbo.vw_PublicProfiles WHERE id=@id`);
+      .query(`SELECT id, first_name, last_name,
+                     DATEDIFF(YEAR,dob,GETDATE()) AS age,
+                     gender, sect, marital_status, education, country, city,
+                     nationality, languages, occupation, bio, interests,
+                     CAST(photo_1 AS NVARCHAR(MAX)) AS photo_1,
+                     CAST(photo_2 AS NVARCHAR(MAX)) AS photo_2,
+                     CAST(photo_3 AS NVARCHAR(MAX)) AS photo_3,
+                     id_verified, online, last_seen, is_banned
+              FROM dbo.users
+              WHERE id=@id AND is_banned=0`);
     if (!r.recordset.length) return err(res,'Not found.',404);
     return ok(res,r.recordset[0]);
-  } catch(e) { return err(res,'Failed.',500); }
+  } catch(e) { console.error('GET /api/users/:id:', e.message); return err(res,'Failed.',500); }
 });
 
 // ── DISCOVER ──────────────────────────────────────────────────
@@ -502,7 +510,7 @@ app.get('/api/discover', auth, async (req, res) => {
                      DATEDIFF(YEAR,u.dob,GETDATE()) AS age,
                      u.city, u.country, u.sect, u.marital_status,
                      u.bio, u.occupation, u.interests,
-                     u.photo_1, u.photo_2, u.photo_3,
+                     CAST(u.photo_1 AS NVARCHAR(MAX)) AS photo_1, CAST(u.photo_2 AS NVARCHAR(MAX)) AS photo_2, CAST(u.photo_3 AS NVARCHAR(MAX)) AS photo_3,
                      u.id_verified, u.online, u.premium
               FROM dbo.users u
               WHERE u.id <> @uid
@@ -595,9 +603,32 @@ app.post('/api/likes', auth, async (req, res) => {
 app.get('/api/matches', auth, async (req, res) => {
   try {
     const db = await getPool();
-    const r  = await db.request().input('user_id',sql.NVarChar(36),req.user.id).execute('dbo.sp_GetMatches');
+    // Use direct SQL to get full photo_1 (SP may have cached NVARCHAR(500) limit)
+    const r = await db.request()
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query(`SELECT
+        m.id            AS match_id,
+        m.created_at    AS matched_at,
+        u.id            AS partner_id,
+        u.first_name,
+        u.last_name,
+        CAST(u.photo_1 AS NVARCHAR(MAX)) AS avatar,
+        u.online,
+        u.last_seen,
+        u.id_verified,
+        (SELECT TOP 1 [text] FROM dbo.messages
+         WHERE match_id=m.id ORDER BY sent_at DESC) AS last_message,
+        (SELECT TOP 1 sent_at FROM dbo.messages
+         WHERE match_id=m.id ORDER BY sent_at DESC) AS last_message_at,
+        (SELECT COUNT(*) FROM dbo.messages
+         WHERE match_id=m.id AND to_user_id=@uid AND is_read=0) AS unread_count
+      FROM dbo.matches m
+      JOIN dbo.users u ON u.id = CASE
+        WHEN m.user1_id=@uid THEN m.user2_id ELSE m.user1_id END
+      WHERE (m.user1_id=@uid OR m.user2_id=@uid)
+      ORDER BY last_message_at DESC`);
     return ok(res, r.recordset);
-  } catch(e) { return err(res,'Failed.',500); }
+  } catch(e) { console.error('GET /api/matches:', e.message); return err(res,'Failed.',500); }
 });
 
 app.delete('/api/matches/:id', auth, async (req, res) => {
@@ -906,11 +937,16 @@ app.get('/api/events', (req, res) => {
     req.user = decoded;
   } catch(e) { res.status(401).end(); return; }
 
-  res.setHeader('Content-Type',  'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection',    'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Content-Type',       'text/event-stream');
+  res.setHeader('Cache-Control',      'no-cache, no-transform');
+  res.setHeader('Connection',         'keep-alive');
+  res.setHeader('X-Accel-Buffering',  'no');  // Disable nginx buffering
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Transfer-Encoding',  'chunked');
+  res.status(200);
   res.flushHeaders();
+  // Send initial comment to establish connection
+  res.write(': connected\n\n');
 
   sseClients.set(userId, res);
   console.log('[SSE] Client connected:', userId);
