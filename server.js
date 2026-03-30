@@ -839,18 +839,6 @@ app.post('/api/calls', auth, async (req, res) => {
 
     console.log('[CALL] Created:', callId, '| type:', call_type, '| match:', matchId || 'none');
 
-    // Push real-time call notification via SSE to receiver
-    const pushed = pushToUser(to_user_id, 'incoming_call', {
-      call_id:     callId,
-      call_type:   call_type,
-      caller_id:   req.user.id,
-      caller_name: callerName,
-      sdp_offer:   sdp_offer || '',
-      status:      'ringing',
-      created_at:  new Date().toISOString(),
-    });
-    console.log('[CALL] SSE push to', to_user_id, ':', pushed ? 'delivered' : 'queued (user offline)');
-
     return ok(res, { call_id: callId, status: 'ringing' }, 201);
   } catch(e) {
     console.error('Call POST:', e.message);
@@ -906,35 +894,6 @@ app.patch('/api/calls/:id/answer', auth, async (req, res) => {
     }
     await rq.query("UPDATE dbo.call_logs SET " + sets.join(',') + " WHERE id=@id AND (caller_id=@uid OR receiver_id=@uid)");
 
-    // Push answer/status update to the other party via SSE
-    if (status === 'accepted' && sdp_answer) {
-      // Find caller to push to
-      try {
-        const callR = await (await getPool()).request()
-          .input('id', sql.NVarChar(36), req.params.id)
-          .query("SELECT caller_id, receiver_id FROM dbo.call_logs WHERE id=@id");
-        const call = callR.recordset[0];
-        if (call) {
-          const otherId = call.caller_id === req.user.id ? call.receiver_id : call.caller_id;
-          pushToUser(otherId, 'call_answered', {
-            call_id: req.params.id, status, sdp_answer: sdp_answer || null
-          });
-          console.log('[CALL] Answer pushed via SSE to', otherId);
-        }
-      } catch(e2) { /* non-critical */ }
-    } else if (status === 'declined' || status === 'ended') {
-      try {
-        const callR = await (await getPool()).request()
-          .input('id', sql.NVarChar(36), req.params.id)
-          .query("SELECT caller_id, receiver_id FROM dbo.call_logs WHERE id=@id");
-        const call = callR.recordset[0];
-        if (call) {
-          const otherId = call.caller_id === req.user.id ? call.receiver_id : call.caller_id;
-          pushToUser(otherId, 'call_ended', { call_id: req.params.id, status });
-        }
-      } catch(e2) { /* non-critical */ }
-    }
-
     return ok(res, { updated: true });
   } catch(e) { return err(res, 'Failed.', 500); }
 });
@@ -974,60 +933,8 @@ app.post('/api/reports', auth, async (req, res) => {
 // ── NOTIFICATIONS ─────────────────────────────────────────────
 // Send notification (used by call system)
 
-// ── SSE: Real-time event stream ─────────────────────────
-const sseClients = new Map(); // userId -> res
+// Real-time delivery via polling (SSE removed — Railway proxy incompatible)
 
-app.get('/api/events', (req, res) => {
-  // Auth via query param (EventSource doesn't support headers)
-  const token = req.query.token || req.headers.authorization?.replace('Bearer ','');
-  if (!token) { res.status(401).end(); return; }
-  let userId;
-  try {
-    const decoded = require('jsonwebtoken').verify(token, cleanEnv(process.env.JWT_SECRET, 'secret'));
-    userId = decoded.id || decoded.sub;
-    req.user = decoded;
-  } catch(e) { res.status(401).end(); return; }
-
-  res.setHeader('Content-Type',       'text/event-stream');
-  res.setHeader('Cache-Control',      'no-cache, no-transform');
-  res.setHeader('Connection',         'keep-alive');
-  res.setHeader('X-Accel-Buffering',  'no');  // Disable nginx buffering
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Transfer-Encoding',  'chunked');
-  res.status(200);
-  res.flushHeaders();
-  // Send initial comment to establish connection
-  res.write(': connected\n\n');
-
-  sseClients.set(userId, res);
-  console.log('[SSE] Client connected:', userId);
-
-  // Send heartbeat every 15s to keep connection alive
-  const hb = setInterval(() => {
-    try { res.write('event: ping\ndata: {}\n\n'); }
-    catch(e) { clearInterval(hb); sseClients.delete(userId); }
-  }, 15000);
-
-  req.on('close', () => {
-    clearInterval(hb);
-    sseClients.delete(userId);
-    console.log('[SSE] Client disconnected:', userId);
-  });
-});
-
-// Helper: push event to a specific user instantly
-function pushToUser(userId, event, data) {
-  const client = sseClients.get(userId);
-  if (client) {
-    try {
-      client.write('event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n');
-      return true;
-    } catch(e) {
-      sseClients.delete(userId);
-    }
-  }
-  return false;
-}
 
 app.post('/api/notifications', auth, async (req, res) => {
   try {
@@ -1047,13 +954,6 @@ app.post('/api/notifications', auth, async (req, res) => {
     } else {
       await rq2.query("INSERT INTO dbo.notifications(user_id,type,title,body,related_user_id,is_read) VALUES(@uid,@type,@title,@body,@fuid,0)");
     }
-    // Push via SSE for instant delivery
-    pushToUser(to_user_id, 'notification', {
-      type: type || 'system', title, body: body || '',
-      call_id: call_id || null,
-      related_match_id: related_match_id || null,
-    });
-
     return ok(res, { sent: true }, 201);
   } catch(e) {
     console.error('POST /api/notifications:', e.message);
