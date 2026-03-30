@@ -834,6 +834,25 @@ app.post('/api/calls', auth, async (req, res) => {
 });
 
 // Get single call (for polling)
+
+// Get pending/ringing calls for current user (fallback for SSE)
+app.get('/api/calls/pending', auth, async (req, res) => {
+  try {
+    const db = await getPool();
+    const r = await db.request()
+      .input('uid', sql.NVarChar(36), req.user.id)
+      .query(`SELECT TOP 5
+                id, caller_id, receiver_id, call_type, status,
+                sdp_offer, caller_name, created_at
+              FROM dbo.call_logs
+              WHERE receiver_id = @uid
+                AND status = 'ringing'
+                AND created_at >= DATEADD(MINUTE, -2, SYSUTCDATETIME())
+              ORDER BY created_at DESC`);
+    return ok(res, r.recordset);
+  } catch(e) { return err(res, 'Failed.', 500); }
+});
+
 app.get('/api/calls/:id', auth, async (req, res) => {
   try {
     const db = await getPool();
