@@ -457,8 +457,14 @@ app.put('/api/users/me', auth, async (req, res) => {
       if (req.body[f]!==undefined) { sets.push(`${f}=@${f}`); rq.input(f,sql.NVarChar(sql.MAX),req.body[f]); }
     }
     await rq.query(`UPDATE dbo.users SET ${sets.join(',')} WHERE id=@id`);
-    return ok(res,{message:'Profile updated.'});
-  } catch(e) { return err(res,'Update failed.',500); }
+    // Reload fresh user data to return
+    const updR = await db.request().input('id', sql.NVarChar(36), req.user.id)
+      .query("SELECT id,first_name,last_name,email,photo_1,photo_2,photo_3,bio,occupation,city,country,sect,premium,sub_status FROM dbo.users WHERE id=@id");
+    return ok(res, updR.recordset[0] || { message: 'Profile updated.' });
+  } catch(e) {
+    console.error('PUT /api/users/me:', e.message);
+    return err(res, 'Update failed: ' + e.message, 500);
+  }
 });
 
 app.get('/api/users/:id', auth, async (req, res) => {
@@ -1013,19 +1019,27 @@ async function migrateCallLogs() {
     else
       console.log('[DB] Schema up to date');
 
-    // Fix call_logs status CHECK constraint to support WebRTC call states
+    // Fix call_logs status CHECK constraint
     try {
       await db.request().query("ALTER TABLE dbo.call_logs DROP CONSTRAINT CK_call_status");
       await db.request().query("ALTER TABLE dbo.call_logs ADD CONSTRAINT CK_call_status CHECK ([status] IN ('ringing','accepted','completed','missed','declined','ended'))");
-      console.log('[DB] CK_call_status constraint updated');
-    } catch(e2) { /* constraint already updated or dropped */ }
+      console.log('[DB] CK_call_status updated');
+    } catch(e2) { /* already updated */ }
 
-    // Make match_id nullable (has FK but we need to allow calls without match_id)
+    // Make match_id nullable
     try {
       await db.request().query("ALTER TABLE dbo.call_logs DROP CONSTRAINT FK_calls_match");
       await db.request().query("ALTER TABLE dbo.call_logs ALTER COLUMN match_id NVARCHAR(36) NULL");
-      console.log('[DB] match_id made nullable');
+      console.log('[DB] match_id nullable');
     } catch(e3) { /* already done */ }
+
+    // Expand photo columns from NVARCHAR(500) to NVARCHAR(MAX) for base64 storage
+    try {
+      await db.request().query("ALTER TABLE dbo.users ALTER COLUMN photo_1 NVARCHAR(MAX) NULL");
+      await db.request().query("ALTER TABLE dbo.users ALTER COLUMN photo_2 NVARCHAR(MAX) NULL");
+      await db.request().query("ALTER TABLE dbo.users ALTER COLUMN photo_3 NVARCHAR(MAX) NULL");
+      console.log('[DB] Photo columns expanded to NVARCHAR(MAX)');
+    } catch(e4) { /* already MAX */ }
 
   } catch(e) {
     console.error('[DB Migration]:', e.message);
